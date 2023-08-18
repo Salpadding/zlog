@@ -23,6 +23,7 @@ import (
 const (
 	// 512KB
 	MaxBufferSize = 512 * 1024
+	MaxTextSize   = 512
 )
 
 func init() {
@@ -171,23 +172,28 @@ func (p *proxyWriter) Write(data []byte) (n int, err error) {
 	return
 }
 
-func (p *proxyWriter) tryToJson(buf bytes.Buffer) string {
-	s := p.bodyBuf.String()
+func (p *proxyWriter) tryToJson(buf bytes.Buffer) (out string) {
+	out = buf.String()
+	defer func() {
+		if len(out) > MaxTextSize {
+			out = out[:MaxTextSize]
+		}
+	}()
 	var (
 		jsonObj interface{}
 		err     error
 	)
 
-	if err = json.Unmarshal([]byte(s), &jsonObj); err != nil {
-		data, _ := json.Marshal(jsonObj)
-		return string(data)
+	if err = json.Unmarshal([]byte(out), &jsonObj); err != nil {
+		return strings.ReplaceAll(out, "\n", "\\n")
 	}
-	return strings.ReplaceAll(s, "\n", "\\n")
+	data, _ := json.Marshal(jsonObj)
+	return string(data)
 }
 
-func (p *proxyWriter) writeLog(w io.Writer) {
+func (p *proxyWriter) writeLog(d time.Duration, w io.Writer) {
 	now := time.Now().Format("2006-01-02 15:04:05")
-	fmt.Fprintf(w, "%s %d %s %s %s", now, p.code, p.req.Method, p.req.URL.Path, p.req.Header.Get("Content-Type"))
+	fmt.Fprintf(w, "%s %s %d %s %s %s", now, d.String(), p.code, p.req.Method, p.req.URL.Path, p.req.Header.Get("Content-Type"))
 
 	if p.req.ContentLength > MaxBufferSize {
 		w.Write([]byte(" [Large Request] "))
@@ -207,7 +213,7 @@ func (p *proxyWriter) writeLog(w io.Writer) {
 // ServeHTTP 打印日志
 // 格式 = 时间 + Code + 请求方法 + PATH + HOSTNAME + 路径 + 请求体 + 响应体
 func (z *ZLog) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) (err error) {
-	z.printCfg()
+	start := time.Now()
 	writer := proxyWriter{
 		ResponseWriter: w,
 		req:            r,
@@ -216,9 +222,10 @@ func (z *ZLog) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.
 	r.Body = &writer
 
 	err = next.ServeHTTP(&writer, r)
+	end := time.Now()
 	if z.LogFile != nil {
 		var buf bytes.Buffer
-		writer.writeLog(&buf)
+		writer.writeLog(end.Sub(start), &buf)
 		s := buf.String()
 		z.LogFile.Write([]byte(s))
 		os.Stdout.Write([]byte(s))
