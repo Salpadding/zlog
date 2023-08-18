@@ -2,7 +2,11 @@ module github.com/Salpadding/zlog
 
 go 1.20
 
-require github.com/caddyserver/caddy/v2 v2.7.4
+require (
+	github.com/caddyserver/caddy/v2 v2.7.4
+	github.com/jinzhu/copier v0.3.5
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
+)
 
 require (
 	filippo.io/edwards25519 v1.0.0 // indirect
