@@ -21,9 +21,7 @@ import (
 )
 
 const (
-	// 512KB
-	MaxBufferSize = 512 * 1024
-	MaxTextSize   = 512
+	DefaultTruncate = 1024
 )
 
 func init() {
@@ -37,6 +35,7 @@ type ZLog struct {
 	FileWriter logging.FileWriter
 	LogFile    io.WriteCloser
 	FileName   string
+	Truncate   uint64
 }
 
 func (z *ZLog) CaddyModule() caddy.ModuleInfo {
@@ -67,7 +66,12 @@ func (z *ZLog) UnmarshalCaddyfile(d *caddyfile.Dispenser) (err error) {
 				if d.NextArg() {
 					return d.ArgErr()
 				}
-
+			case "truncate":
+				var sizeStr string
+				if !d.AllArgs(&sizeStr) {
+					return d.ArgErr()
+				}
+				z.Truncate, _ = humanize.ParseBytes(sizeStr)
 			case "roll_size":
 				var sizeStr string
 				if !d.AllArgs(&sizeStr) {
@@ -119,33 +123,32 @@ func (z *ZLog) UnmarshalCaddyfile(d *caddyfile.Dispenser) (err error) {
 			}
 		}
 	}
+	if z.Truncate == 0 {
+		z.Truncate = DefaultTruncate
+	}
 	z.printCfg()
 	return nil
 }
 
 type proxyWriter struct {
 	http.ResponseWriter
-	buf     bytes.Buffer
-	code    int
-	req     *http.Request
-	body    io.ReadCloser
-	bodyBuf bytes.Buffer
-	respLen int
+	respBuf  bytes.Buffer
+	respSize int
+
+	code int
+	req  *http.Request
+	body io.ReadCloser
+
+	reqBuf  bytes.Buffer
+	reqSize int
+
+	truncate int
 }
 
 func (pw *proxyWriter) Read(p []byte) (n int, err error) {
 	n, err = pw.body.Read(p)
-	if pw.req.ContentLength > MaxBufferSize {
-		return
-	}
-	// 不记录非 ascii 字符
-	for i := 0; i < n; i++ {
-		if p[i] > 127 {
-			return
-		}
-	}
-
-	pw.bodyBuf.Write(p[:n])
+	pw.reqSize += n
+	pw.reqBuf.Write(p[:pw.min(pw.truncate-pw.reqBuf.Len(), n)])
 	return
 }
 
@@ -162,23 +165,29 @@ func (p *proxyWriter) WriteHeader(statusCode int) {
 	p.ResponseWriter.WriteHeader(statusCode)
 	p.code = statusCode
 }
+
+func (p *proxyWriter) min(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
+}
 func (p *proxyWriter) Write(data []byte) (n int, err error) {
 	n, err = p.ResponseWriter.Write(data)
-	p.respLen += n
-	if p.buf.Len() >= MaxBufferSize {
-		return
-	}
-	p.buf.Write(data)
+	p.respSize += n
+	p.respBuf.Write(data[:p.min(len(data), p.truncate-p.respBuf.Len())])
 	return
 }
 
 func (p *proxyWriter) tryToJson(buf bytes.Buffer) (out string) {
-	out = buf.String()
-	defer func() {
-		if len(out) > MaxTextSize {
-			out = out[:MaxTextSize]
+	bytes := buf.Bytes()
+    // 发现非 ascii 字符 
+	for i := range bytes {
+		if bytes[i] > 127 {
+			return
 		}
-	}()
+	}
+	out = string(bytes)
 	var (
 		jsonObj interface{}
 		err     error
@@ -194,18 +203,8 @@ func (p *proxyWriter) tryToJson(buf bytes.Buffer) (out string) {
 func (p *proxyWriter) writeLog(d time.Duration, w io.Writer) {
 	now := time.Now().Format("2006-01-02 15:04:05")
 	fmt.Fprintf(w, "%s %s %d %s %s %s", now, d.String(), p.code, p.req.Method, p.req.URL.Path, p.req.Header.Get("Content-Type"))
-
-	if p.req.ContentLength > MaxBufferSize {
-		w.Write([]byte(" [Large Request] "))
-	} else {
-		fmt.Fprintf(w, " %s", p.tryToJson(p.bodyBuf))
-	}
-
-	if p.respLen > MaxBufferSize {
-		w.Write([]byte(" [Large Response] "))
-	} else {
-		fmt.Fprintf(w, " %s", p.tryToJson(p.buf))
-	}
+	fmt.Fprintf(w, " [request body %s] %s", humanize.Bytes(uint64(p.reqSize)), p.tryToJson(p.reqBuf))
+	fmt.Fprintf(w, " %s [response body %s] %s", p.ResponseWriter.Header().Get("Content-Type"), humanize.Bytes(uint64(p.respSize)), p.tryToJson(p.respBuf))
 
 	w.Write([]byte(" \n"))
 }
@@ -218,6 +217,7 @@ func (z *ZLog) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.
 		ResponseWriter: w,
 		req:            r,
 		body:           r.Body,
+		truncate:       int(z.Truncate),
 	}
 	r.Body = &writer
 
