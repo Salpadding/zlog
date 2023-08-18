@@ -7,6 +7,8 @@ import (
 	"os"
 
 	caddy "github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
@@ -16,7 +18,7 @@ const (
 
 func init() {
 	caddy.RegisterModule(&ZLog{})
-
+	httpcaddyfile.RegisterHandlerDirective("zlog", parseCaddyfile)
 }
 
 type ZLog struct {
@@ -27,6 +29,10 @@ func (z *ZLog) CaddyModule() caddy.ModuleInfo {
 		ID:  "zlog",
 		New: func() caddy.Module { return new(ZLog) },
 	}
+}
+
+func (z *ZLog) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	return nil
 }
 
 type proxyWriter struct {
@@ -58,4 +64,11 @@ func (z *ZLog) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.
 		io.Copy(os.Stdout, &writer.buf)
 	}
 	return
+}
+
+// parseCaddyfile unmarshals tokens from h into a new Middleware.
+func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
+	var zlog ZLog
+	err := zlog.UnmarshalCaddyfile(h.Dispenser)
+	return &zlog, err
 }
